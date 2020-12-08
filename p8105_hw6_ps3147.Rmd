@@ -1,0 +1,204 @@
+---
+title: "homework 6 (linear models)"
+author: Purnima Sharma
+date: '`r format(Sys.time(), "%Y-%m-%d")`'
+output: github_document
+---
+
+```{r setup, include=FALSE}
+library(tidyverse)
+library(viridis)
+library(modelr)
+library(p8105.datasets)
+library(mgcv)
+
+knitr::opts_chunk$set(
+	echo = TRUE,
+	warning = FALSE,
+	fig.width = 8, 
+  fig.height = 6,
+  out.width = "90%"
+)
+options(
+  ggplot2.continuous.colour = "viridis",
+  ggplot2.continuous.fill = "viridis"
+)
+scale_colour_discrete = scale_colour_viridis_d
+scale_fill_discrete = scale_fill_viridis_d
+theme_set(theme_minimal() + theme(legend.position = "bottom"))
+```
+
+## Problem 1
+
+```{r}
+homicide_df = 
+  read_csv("data/homicide-data.csv", na = c("", "NA", "Unknown")) %>% 
+  mutate(
+    city_state = str_c(city, state, sep = ", "),
+    victim_age = as.numeric(victim_age),
+    resolution = case_when(
+      disposition == "Closed without arrest" ~ 0,
+      disposition == "Open/No arrest"        ~ 0,
+      disposition == "Closed by arrest"      ~ 1)
+  ) %>% 
+  filter(
+    victim_race %in% c("White", "Black"),
+    city_state != "Tulsa, AL") %>% 
+  select(city_state, resolution, victim_age, victim_race, victim_sex)
+```
+
+Start with one city.
+
+```{r}
+baltimore_df =
+  homicide_df %>% 
+  filter(city_state == "Baltimore, MD")
+glm(resolution ~ victim_age + victim_race + victim_sex, 
+    data = baltimore_df,
+    family = binomial()) %>% 
+  broom::tidy() %>% 
+  mutate(
+    OR = exp(estimate),
+    CI_lower = exp(estimate - 1.96 * std.error),
+    CI_upper = exp(estimate + 1.96 * std.error)
+  ) %>% 
+  select(term, OR, starts_with("CI")) %>% 
+  knitr::kable(digits = 3)
+```
+
+Try this across cities.
+
+```{r}
+models_results_df =
+homicide_df %>% 
+  nest(data = -city_state) %>% 
+  mutate(
+    models = 
+      map(.x = data, ~glm(resolution ~ victim_age + victim_race + victim_sex, data = .x, family = binomial())),
+     results = map(models, broom::tidy)
+  ) %>% 
+  select(city_state, results) %>% 
+  unnest(results) %>% 
+  mutate(
+    OR = exp(estimate),
+    CI_lower = exp(estimate - 1.96 * std.error),
+    CI_upper = exp(estimate + 1.96 * std.error)
+  ) %>% 
+  select(city_state, term, OR, starts_with("CI"))
+```
+
+Make plots.
+
+```{r}
+models_results_df %>% 
+  filter(term == "victim_sexMale") %>% 
+  mutate(city_state = fct_reorder(city_state, OR)) %>% 
+  ggplot(aes(x = city_state, y = OR)) +
+  geom_point() + 
+  geom_errorbar(aes(ymin = CI_lower, ymax = CI_upper)) + 
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))
+```
+
+## Problem 2
+
+Effects of variables on child's birthweight.
+
+Load and clean data.
+
+```{r}
+baby_df = 
+  read_csv("./data/birthweight.csv") %>% 
+  relocate(bwt) %>% 
+  mutate(
+    frace = as.factor(frace),
+    babysex = as.factor(babysex),
+    malform = as.factor(malform),
+    mrace = as.factor(mrace)
+  ) %>% 
+  drop_na(bwt, blength, gaweeks, bhead, blength, babysex) 
+```
+
+Build regression model.
+
+```{r}
+# scatterplot matrix and pairwise correlations
+pairs(baby_df)
+
+proposed_model = lm(bwt ~ gaweeks + wtgain + bhead * blength + ppbmi * ppwt, data = baby_df)
+
+broom::tidy(proposed_model) 
+
+proposed_model = lm(bwt ~ gaweeks + wtgain + ppwt + bhead * blength, data = baby_df) 
+
+broom::tidy(proposed_model)
+```
+
+The proposed model is built based on the outcome of scatterplot matrix and pairwise correlations to check for significant covariates and any interaction terms. Due to insignificant p-value at 5% significance level of ppbmi, it is removed from the model. Gestational age in weeks, mother's weight gain during pregnancy (lbs), mother's pre-pregnancy weight (lbs), interaction between baby's head circumference (cm) and length (cm) at birth are retained as significant factors underlying baby's birthweight.
+
+Plot of residuals against fitted values.
+
+```{r}
+modelr::add_residuals(baby_df, proposed_model) %>%
+add_predictions(proposed_model) %>%
+ggplot(aes(x = pred, y = resid)) +
+  geom_point() + 
+  geom_line(aes(y = 0), color = "red")
+```
+
+The residuals seem to be evenly distributed around zero for the predicted birthweights (gm), except for some low-end outliers with over-estimated residuals. For the most part, the cluster is around 2,000gm to 4,000gm of birthweight.
+
+Compare models
+
+```{r}
+model_one = lm(bwt ~ blength + gaweeks, data = baby_df)
+broom::tidy(model_one) 
+
+model_two = lm(bwt ~ bhead * blength * babysex, data = baby_df)
+broom::tidy(model_two) 
+
+proposed_model = lm(bwt ~ gaweeks + wtgain + ppwt + bhead * blength, data = baby_df)
+
+# Cross-validation, 100 repetitions 
+cv_df =
+  crossv_mc(baby_df, 100) %>%   
+  mutate(
+    train = map(train, as_tibble),
+    test = map(test, as_tibble))
+
+#fit models and get prediction errors 
+cv_df = 
+cv_df %>%    
+  mutate(
+    model_one = map(.x = train, ~lm(bwt ~ blength + gaweeks, data = .x)), 
+    model_two = map(.x = train, ~lm(bwt ~ bhead * blength * babysex, data = .x)),
+    proposed_model = map(.x = train, ~lm(bwt ~ gaweeks + wtgain + ppwt + bhead * blength, data = .x))
+  ) %>% 
+  mutate(           
+    rmse_model_one = map2_dbl(.x = model_one, .y = test, ~rmse(model = .x, data = .y)),
+    rmse_model_two = map2_dbl(.x = model_two, .y = test, ~rmse(model = .x, data = .y)),
+    rmse_proposed = map2_dbl(.x = proposed_model, .y = test, ~rmse(model = .x, data = .y))
+  )
+```
+
+Plot to compare prediction errors.
+
+```{r}
+cv_df %>% 
+  select(starts_with("rmse")) %>%    
+  pivot_longer(
+    everything(),   
+    names_to = "model",
+    values_to = "rmse",
+    names_prefix = "rmse_"   
+  ) %>%         
+  ggplot(aes(x = model, y = rmse)) +
+  geom_violin() 
+```
+
+The results show that the standard deviation of the residuals, given by Root Mean Square Error (rmse) was the lowest in the proposed model, even if just slightly lower than the given model 2. Clearly, there was a great improvement in model-building from model 1 to model 2 and proposed model.   
+
+## Problem 3
+
+
+
+
